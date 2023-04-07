@@ -45,7 +45,6 @@ class Solution:
     
 
 solution = Solution()
-# 调用函数
 count = solution.uniquePathsWithObstacles([[0,0,0],[0,1,0],[0,0,0]])
 
 print(count)

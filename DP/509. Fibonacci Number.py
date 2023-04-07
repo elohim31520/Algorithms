@@ -32,7 +32,6 @@ class Solution:
 
 
 solution = Solution()
-# 调用函数
 fibo = solution.fib(4)
 
-print(fibo)  # 输出最大子序和
+print(fibo)

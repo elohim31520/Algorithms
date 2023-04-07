@@ -29,12 +29,9 @@ class Solution:
 
         return max(dp)
 
-
-# 创建类实例
 solution = Solution()
 
-# 调用函数
 nums = [-2, 1, -3, 4, -1, 2, 1, -5, 4]
 max_sum = solution.maxSubArray(nums)
 
-print(max_sum)  # 输出最大子序和
+print(max_sum)

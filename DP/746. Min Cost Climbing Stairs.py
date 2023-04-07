@@ -37,11 +37,8 @@ class Solution:
 
         return dp[n]
 
-# 创建类实例
 solution = Solution()
-
-# 调用函数
 costs = [10,15,20]
 min_cost = solution.minCostClimbingStairs(costs)
 
-print(min_cost)  # 输出最大子序和
+print(min_cost)

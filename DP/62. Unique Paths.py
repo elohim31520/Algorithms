@@ -36,7 +36,6 @@ class Solution:
         return dp[-1][-1]
 
 solution = Solution()
-# 调用函数
 count = solution.uniquePaths(3, 7)
 
-print(count)  # 输出最大子序和
+print(count)

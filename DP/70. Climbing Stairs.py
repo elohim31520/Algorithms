@@ -36,7 +36,6 @@ class Solution:
 
 
 solution = Solution()
-# 调用函数
 count = solution.climbStairs(3)
 
-print(count)  # 输出最大子序和
+print(count)
