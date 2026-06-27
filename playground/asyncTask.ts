@@ -132,7 +132,7 @@ class SearchManager {
             const response = await fetch(url, { signal: controller.signal })
             return await response.json()
         } catch (error) {
-            return error
+            throw error
         } finally {
             if (this.controller === controller) {
                 this.controller = null;
@@ -366,10 +366,7 @@ class CircuitBreaker {
     constructor(
         private failureThreshold: number, // 最大連續失敗次數
         private recoveryTimeout: number    // 跳閘後冷卻時間（毫秒）
-    ) {
-        this.recoveryTimeout = recoveryTimeout
-        this.failureThreshold = failureThreshold
-    }
+    ) { }
 
     /**
      * 包裝原本的非同步請求
@@ -474,6 +471,8 @@ interface CacheEntry {
     fetchedAt: number; // 記錄這筆資料是什麼時候抓到的（Date.now()）
 }
 
+
+// 用最簡單的一句話直白來說：「有新的給新的，舊的過期先頂著用、背景偷偷換新的，什麼都沒有就大家一起等新的。」
 class SWRCache {
     private cache = new Map<string, CacheEntry>();
     private pendingRequests = new Map<string, Promise<any>>();
@@ -717,4 +716,315 @@ function throttle(func, delay) {
             lock = false
         }, delay)
     }
+}
+
+
+
+/**
+ * 在多執行緒語言中，為了防止多個線程同時修改同一個檔案或記憶體變數（導致 Race Condition），會使用「互斥鎖（Mutex）」。
+ * 雖然 JavaScript 是單執行緒，但非同步操作（如 await readFile 到 await writeFile 之間）依然會被其他非同步任務插隊，進而導致資料被覆蓋。
+ */
+
+class Mutex {
+    private isLocked = false;
+    private queue: (() => void)[] = []; // 提示：儲存等待鎖釋放的 resolve 補給站
+
+    /**
+     * 獲取鎖。如果鎖被佔用，則會 await 阻塞，直到前一個人釋放鎖。
+     * @returns 回傳一個用於解鎖的 release 函式
+     */
+    public async acquire(): Promise<() => void> {
+        if (this.isLocked) {
+            await new Promise<void>(rs => {
+                this.queue.push(rs)
+            })
+        } else {
+            this.isLocked = true
+        }
+
+        let released = false;
+        const release = () => {
+            if (released) return;
+            released = true
+
+            const next = this.queue.shift()
+            if (next) next()
+            else this.isLocked = false
+        }
+        return release
+    }
+}
+
+const mutex = new Mutex();
+let sharedResource = 0;
+
+async function criticalSection(id: number) {
+    const release = await mutex.acquire(); // 👈 在這裡排隊拿鎖
+
+    console.log(`[任務 ${id}] 成功拿到了鎖，開始執行敏感操作...`);
+    // 模擬耗時的非同步操作
+    await new Promise(resolve => setTimeout(resolve, 500));
+    sharedResource += 1;
+
+    console.log(`[任務 ${id}] 操作結束，釋放鎖。`);
+    release(); // 👈 核心：交出鑰匙，讓下一棒進來
+}
+
+// 同時轟炸三個任務
+criticalSection(1);
+criticalSection(2);
+criticalSection(3);
+
+// 期待行為：三個任務絕對不會交錯執行，而是會乖乖地每隔 500ms 依序「整套跑完」
+// [任務 1] 成功拿到了鎖... -> (等500ms) -> [任務 1] 操作結束，釋放鎖。
+// [任務 2] 成功拿到了鎖... -> (等500ms) -> [任務 2] 操作結束，釋放鎖。
+// [任務 3] 成功拿到了鎖... -> (等500ms) -> [任務 3] 操作結束，釋放鎖。
+
+
+
+
+/**
+ * 標準的 Node.js EventEmitter 或瀏覽器的 addEventListener 都是同步觸發的。也就是說，當你 emit('save') 時，它只是把所有註冊的 listener 丟進去執行，並不會等待 listener 內部的 await 結束。
+
+但在實務架構中（例如 Webpack 的外掛系統 Tapable、或是伺服器的生命周期鉤子 Hooks），我們希望讓外掛執行非同步操作（如優化圖片、檢查權限）。當發布事件時，系統必須一個接一個（串行 Sequential）等待每個外掛的 Promise 解析完成，才能往下走。
+ */
+type AsyncListener = (...args: any[]) => Promise<void>;
+
+class AsyncEventEmitter {
+    // 儲存事件名稱與對應的監聽器陣列
+    private listenersMap = new Map<string, AsyncListener[]>();
+
+    /**
+     * 註冊事件監聽器
+     */
+    public on(event: string, listener: AsyncListener): void {
+        if (!this.listenersMap.has(event)) {
+            this.listenersMap.set(event, []);
+        }
+        this.listenersMap.get(event)!.push(listener);
+    }
+
+    /**
+     * 觸發事件。
+     * 核心要求：必須「依序 await」該事件底下的所有監聽器。
+     * 前一個監聽器的 Promise 沒 resolve，絕對不能執行下一個。
+     */
+    public async emit(event: string, ...args: any[]): Promise<void> {
+        const listeners = this.listenersMap.get(event)
+        if (listeners) {
+            for (const listener of listeners) {
+                await listener(...args)
+            }
+        }
+    }
+}
+
+const emitter = new AsyncEventEmitter();
+
+emitter.on('upload', async (fileName) => {
+    console.log(`[外掛 A] 開始優化 ${fileName}...`);
+    await new Promise(r => setTimeout(r, 1000)); // 模擬耗時 1 秒
+    console.log(`[外掛 A] 優化 ${fileName} 完成。`);
+});
+
+emitter.on('upload', async (fileName) => {
+    console.log(`[外掛 B] 開始上傳 ${fileName} 到 AWS...`);
+    await new Promise(r => setTimeout(r, 500));  // 模擬耗時 0.5 秒
+    console.log(`[外掛 B] 上傳 ${fileName} 成功！`);
+});
+
+// 執行觸發
+console.log('--- 觸發事件 ---');
+emitter.emit('upload', 'video.mp4').then(() => {
+    console.log('--- 所有非同步外掛全部嚴格依序執行完畢！ ---');
+});
+
+// 期待主控台輸出（時間軸必須完全對齊）：
+// --- 觸發事件 ---
+// [外掛 A] 開始優化 video.mp4...
+// (嚴格等 1 秒後)
+// [外掛 A] 優化 video.mp4 完成。
+// [外掛 B] 開始上傳 video.mp4 到 AWS...
+// (嚴格等 0.5 秒後)
+// [外掛 B] 上傳 video.mp4 成功！
+// --- 所有非同步外掛全部嚴格依序執行完畢！ ---
+
+
+/**
+ * 題目十四：非同步讀寫鎖 (Async Read-Write Lock / RWLock)
+業務情境
+在設計高併發的記憶體快取或小型的類資料庫結構時，我們常遇到這個情境：
+
+讀取資料（Read）：是安全的，不論同時有多少人一起讀，都不會互相破壞資料。因此，多個讀取鎖可以同時並存。
+
+寫入資料（Write）：是危險的。當有人在修改資料時，其他人既不能讀（會讀到髒資料），也不能寫（會覆蓋資料）。因此，寫入鎖必須是完全互斥且排他的。
+
+如果用我們前面提到的標準 Mutex，會連讀取都一起阻擋，導致效能大幅下降。我們需要一個更聰明的「讀寫鎖」。
+
+狀態機規則
+多重讀取（Shared Read）：如果目前鎖被「讀取者」持有，新進來的「讀取請求」可以立刻獲取鎖（不阻塞），大家一起讀。
+
+寫入互斥（Exclusive Write）：如果目前有任何一個人在讀（Read Count > 0）或有人在寫，新進來的「寫入請求」必須就地阻塞（await）。
+
+讀寫互斥：如果目前有人正在寫，新進來的「讀取請求」也必須就地阻塞（await）。
+ */
+
+type WRItem {
+    type: 'write' | 'read'
+    resolve: () => void
+}
+
+class RWLock {
+    private activeReaders = 0;
+    private isWriting = false;
+    private queue: WRItem[] = []
+
+    private processQueue() {
+        if (this.isWriting) return
+        while (this.queue.length > 0) {
+            const next = this.queue[0]
+            if (next.type === 'write') {
+                if (this.activeReaders === 0) {
+                    this.queue.shift()
+                    this.isWriting = true
+                    next.resolve()
+                }
+
+                break //重點!
+            } else {
+                this.activeReaders++
+                this.queue.shift()
+                next.resolve()
+            }
+        }
+    }
+
+    /**
+     * 獲取讀取鎖
+     * @returns 用於釋放讀取鎖的 release 函式
+     */
+    public async acquireRead(): Promise<() => void> {
+        await new Promise(resolve => {
+            this.queue.push({ type: 'read', resolve })
+            this.processQueue()
+        })
+        const release = () => {
+            this.activeReaders--
+            this.processQueue()
+        }
+        return release
+    }
+
+    /**
+     * 獲取寫入鎖
+     * @returns 用於釋放寫入鎖的 release 函式
+     */
+    public async acquireWrite(): Promise<() => void> {
+        await new Promise(resolve => {
+            this.queue.push({ type: 'write', resolve })
+            this.processQueue()
+        })
+        const release = () => {
+            this.isWriting = false
+            this.processQueue()
+        }
+        return release
+    }
+}
+
+const rwLock = new RWLock();
+
+async function reader(id: number) {
+    const release = await rwLock.acquireRead();
+    console.log(`[Reader ${id}] 開始讀取...`);
+    await new Promise(r => setTimeout(r, 300)); // 模擬讀取 300ms
+    console.log(`[Reader ${id}] 讀取完畢。`);
+    release();
+}
+
+async function writer(id: number) {
+    const release = await rwLock.acquireWrite();
+    console.log(`[Writer ${id}] 🛑 開始寫入關鍵資料...`);
+    await new Promise(r => setTimeout(r, 500)); // 模擬寫入 500ms
+    console.log(`[Writer ${id}] ✅ 寫入完畢。`);
+    release();
+}
+
+// 測試轟炸時序
+reader(1);
+reader(2);       // 1 和 2 應該要能【同時】並行讀取
+setTimeout(() => writer(1), 100);  // 100ms 後建立寫入請求，此時 1, 2 還在讀，寫入應該要【被阻塞】
+setTimeout(() => reader(3), 200);  // 200ms 後建立讀取 3，但因為前面有人在排隊等寫入，為了防止寫入餓死，3 也應該【被阻塞】
+
+// 期待輸出順序：
+// [Reader 1] 開始讀取...
+// [Reader 2] 開始讀取... （1和2同時在讀取中）
+// [Reader 1] 讀取完畢。
+// [Reader 2] 讀取完畢。 （當1和2都交出鑰匙後，寫入者終於醒來）
+// [Writer 1] 🛑 開始寫入關鍵資料...
+// [Writer 1] ✅ 寫入完畢。     （寫入者交出鑰匙後，遲到的Reader 3才醒來）
+// [Reader 3] 開始讀取...
+// [Reader 3] 讀取完畢。
+
+
+
+
+
+/**
+ * ### 第一題：具備逾時機制的 Promise (Promise Race)
+**場景：** 在串接 API 時，如果請求時間過長，我們希望自動放棄該請求並拋出錯誤。
+
+**要求：**
+實作一個 `withTimeout<T>` 函式：
+- 接收兩個參數：一個原有的 `Promise<T>` 以及逾時毫秒數 `ms`。
+- 如果 `Promise` 在 `ms` 內完成，回傳其結果。
+- 如果超過 `ms` 毫秒，則回傳一個 Reject，錯誤內容為 `"Request Timeout"`。
+
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+            reject("Request Timeout")
+        }, ms)
+    })
+
+    return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer))
+
+}
+
+
+
+/**
+ * 第二題：非同步重試機制 (Async Retry)
+    場景： 網路環境不穩定時，我們希望某些關鍵請求失敗後能自動重試。
+
+    要求：
+    實作一個 retryFetch<T> 函式：
+
+    接收一個回傳 Promise 的函式 task: () => Promise<T>。
+
+    接收一個重試次數 retries: number。
+
+    如果 task 失敗，會自動重試，直到成功或達到重試次數上限。
+
+    若最終仍失敗，拋出最後一次的錯誤。
+ */
+
+async function retryFetch<T>(task: () => Promise<T>, retries: number): Promise<T> {
+    for (let retryCount = 1; retryCount <= retries; retryCount++) {
+        try {
+            const res = await task()
+            return res
+        } catch (error) {
+            retryCount++
+            if (retryCount === retries) {
+                throw error
+            }
+            const waitTime = 1000 * retryCount * (2 ** (retryCount - 1))
+            await new Promise(rs => setTimeout(rs, waitTime))
+        }
+
+    }
+    throw new Error("Unexpected end of retryFetch");
 }
