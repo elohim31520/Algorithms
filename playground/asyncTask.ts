@@ -153,7 +153,7 @@ class SearchManager {
 class RequestDeduplicator {
     private map: Map<string, Promise<any>>
     constructor() {
-        this.map = new Map()
+        this.map = new Map<string, Promise<any>>()
     }
 
     /**
@@ -1027,4 +1027,56 @@ async function retryFetch<T>(task: () => Promise<T>, retries: number): Promise<T
 
     }
     throw new Error("Unexpected end of retryFetch");
+}
+
+
+/**
+ * 第三題：實作簡單的併發限制器 (Concurrency Limit)
+    場景： 假設你有 100 個圖片下載任務，但你希望瀏覽器同時「最多只能執行 3 個」任務，以避免記憶體溢出。
+
+    要求：
+    實作一個 concurrencyLimit 函式：
+
+    接收一個非同步任務陣列 tasks: (() => Promise<any>)[]。
+
+    接收一個最大併發數 limit: number。
+
+    必須確保同一時間執行的任務數不超過 limit。
+
+    回傳一個 Promise，其結果為所有任務完成後的結果陣列（順序需與 tasks 一致）。
+
+ */
+
+
+async function concurrencyLimitSettled<T>(
+    tasks: (() => Promise<T>)[],
+    limit: number
+): Promise<PromiseSettledResult<T>[]> {
+
+    const res: PromiseSettledResult<T>[] = new Array(tasks.length);
+    let index = 0;
+
+    const work = async () => {
+        while (index < tasks.length) {
+            const currentIndex = index++;
+            const task = tasks[currentIndex];
+
+            try {
+                const value = await task();
+                res[currentIndex] = { status: 'fulfilled', value };
+            } catch (reason) {
+                res[currentIndex] = { status: 'rejected', reason };
+            }
+        }
+    };
+
+    const workers: Promise<void>[] = [];
+    const actualLimit = Math.min(limit, tasks.length);
+    for (let i = 0; i < actualLimit; i++) {
+        workers.push(work());
+    }
+
+    await Promise.all(workers);
+
+    return res;
 }
