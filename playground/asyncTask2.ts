@@ -95,3 +95,55 @@ async function resilientConcurrencyLimit(
         }
     })
 }
+
+
+/**
+ * 題目一：權重訊號量 (Weighted Async Semaphore)
+ * 業務情境：
+ * 你的伺服器記憶體總共只有 100MB。任務 A 需要 50MB，任務 B 需要 70MB。
+ * 當 A 正在執行時，B 必須排隊。如果 A 結束釋放了空間，B 才能進場。
+ */
+class WeightedSemaphore {
+    private currentPermits: number;
+    private queue: { weight: number; resolve: (release: () => void) => void }[] = [];
+
+    constructor(private maxPermits: number) {
+        this.currentPermits = maxPermits;
+    }
+
+    /**
+     * @param weight 該任務需要的權重點數
+     * @returns 回傳一個 release 函式
+     */
+    async acquire(weight: number): Promise<() => void> {
+        if (weight > this.maxPermits) {
+            throw new Error(`weight ${weight} exceeds maxPermits ${this.maxPermits}`);
+        }
+        return new Promise((resolve) => {
+            if (weight <= this.currentPermits) {
+                this.currentPermits -= weight
+                return resolve(this.release(weight))
+            }
+            this.queue.push({ weight, resolve })
+        })
+    }
+
+    private release(weight: number): () => void {
+        return () => {
+            this.currentPermits += weight
+            this.processQueue()
+        }
+    }
+
+    private processQueue() {
+        while (this.queue.length > 0) {
+            const next = this.queue[0]
+            if (next.weight > this.currentPermits) {
+                break
+            }
+            this.queue.shift()
+            this.currentPermits -= next.weight
+            next.resolve(this.release(next.weight))
+        }
+    }
+}
