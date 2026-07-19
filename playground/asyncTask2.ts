@@ -247,3 +247,62 @@ const tasks: TaskNode[] = [
 runTaskGraph(tasks).then((results) => {
     console.log(Object.fromEntries(results));
 });
+
+
+
+/**
+ * 題目三：時間視窗批量處理器 (Time-Windowed Batcher)
+ * 業務情境：
+ * 高頻點擊追蹤系統。使用者一秒點擊 50 次，我們不希望發 50 個請求。
+ * 我們希望：
+ * 1. 湊滿 10 個點擊就送一次。
+ * 2. 或者，如果湊不滿 10 個，但時間過了 500ms 也要送一次（避免延遲過高）。
+ */
+class TimeWindowBatcher<T, R> {
+    private currentBatch: T[] = []
+    private currentResolvers: Array<{
+        resolve: (value: R) => void
+        reject: (reason?: any) => void
+    }> = []
+    private timer: ReturnType<typeof setTimeout> | null = null
+    constructor(
+        private batchHandler: (items: T[]) => Promise<R>,
+        private maxBatchSize: number,
+        private windowMs: number
+    ) { }
+
+    async add(item: T): Promise<R> {
+        return new Promise<R>((resolve, reject) => {
+            this.currentBatch.push(item)
+            this.currentResolvers.push({ resolve, reject })
+
+            if (this.currentBatch.length >= this.maxBatchSize) {
+                this.process()
+            }
+
+            if (this.currentBatch.length === 1) {
+                this.timer = setTimeout(() => this.process(), this.windowMs)
+            }
+        })
+    }
+
+    async process() {
+        if (this.timer !== null) {
+            clearTimeout(this.timer)
+            this.timer = null
+        }
+
+        const params = this.currentBatch
+        const resolvers = this.currentResolvers
+
+        this.currentBatch = []
+        this.currentResolvers = []
+
+        try {
+            const res = await this.batchHandler(params)
+            resolvers.forEach(({ resolve }) => resolve(res))
+        } catch (error) {
+            resolvers.forEach(({ reject }) => reject(error))
+        }
+    }
+}
