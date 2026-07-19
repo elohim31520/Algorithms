@@ -147,3 +147,103 @@ class WeightedSemaphore {
         }
     }
 }
+
+
+/**
+ * 題目二：依賴圖非同步執行器 (Async Dependency Graph Runner)
+ * 業務情境：
+ * 部署流程：1.編譯程式碼(A) -> 2.執行測試(B) 與 3.建立映像檔(C) -> 4.部署到雲端(D)
+ * 其中 B, C 可以並行，但都必須等 A 完成。D 必須等 B, C 都完成。
+ */
+interface TaskNode {
+    id: string;
+    dependencies: string[];
+    task: () => Promise<any>;
+}
+
+async function runTaskGraph(tasks: TaskNode[]): Promise<Map<string, any>> {
+    const taskMap = new Map<string, TaskNode>()
+    for (const task of tasks) {
+        taskMap.set(task.id, task)
+    }
+
+    const promiseMap = new Map<string, Promise<any>>()
+    const resultMap = new Map<string, any>()
+
+    async function run(id: string): Promise<any> {
+        if (promiseMap.has(id)) {
+            return promiseMap.get(id)!
+        }
+
+        const node = taskMap.get(id)
+        if (!node) {
+            throw new Error('缺少任務')
+        }
+
+
+        const execPromise = (async () => {
+            if (node.dependencies.length) {
+                await Promise.all(node.dependencies.map(depId => run(depId)))
+            }
+
+            const res = await node.task()
+            resultMap.set(id, res)
+            return res
+        })()
+
+        promiseMap.set(id, execPromise)
+        return execPromise
+    }
+
+    await Promise.all(tasks.map(t => run(t.id)))
+    return resultMap
+}
+
+const log = (msg: string) => console.log(`[${new Date().toISOString()}] ${msg}`);
+
+const tasks: TaskNode[] = [
+    {
+        id: 'A',
+        dependencies: [],
+        task: async () => {
+            log('A 開始編譯');
+            await new Promise((r) => setTimeout(r, 500));
+            log('A 編譯完成');
+            return 'A-result';
+        },
+    },
+    {
+        id: 'B',
+        dependencies: ['A'],
+        task: async () => {
+            log('B 開始測試');
+            await new Promise((r) => setTimeout(r, 300));
+            log('B 測試完成');
+            return 'B-result';
+        },
+    },
+    {
+        id: 'C',
+        dependencies: ['A'],
+        task: async () => {
+            log('C 開始建立映像檔');
+            await new Promise((r) => setTimeout(r, 400));
+            log('C 建立完成');
+            return 'C-result';
+        },
+    },
+    {
+        id: 'D',
+        dependencies: ['B', 'C'],
+        task: async () => {
+            log('D 開始部署');
+            await new Promise((r) => setTimeout(r, 200));
+            log('D 部署完成');
+            return 'D-result';
+        },
+    },
+];
+
+runTaskGraph(tasks).then((results) => {
+    console.log(Object.fromEntries(results));
+});
